@@ -19,8 +19,8 @@ pip3 install -r requirements.txt
 ```bash
 python3 ./main.py --help
 
-usage: main.py [-h] --sqlite SQLITE --clickhouse-host CLICKHOUSE_HOST --clickhouse-port CLICKHOUSE_PORT --clickhouse-user CLICKHOUSE_USER --clickhouse-password CLICKHOUSE_PASSWORD
-               --clickhouse-database CLICKHOUSE_DATABASE [--max-workers MAX_WORKERS]
+usage: main.py [-h] --sqlite SQLITE --clickhouse-host CLICKHOUSE_HOST [--clickhouse-port CLICKHOUSE_PORT] --clickhouse-user CLICKHOUSE_USER --clickhouse-password CLICKHOUSE_PASSWORD --clickhouse-database
+               CLICKHOUSE_DATABASE [--chunk-size CHUNK_SIZE]
 
 Transfer data from SQLite to ClickHouse.
 
@@ -37,8 +37,9 @@ options:
                         ClickHouse password.
   --clickhouse-database CLICKHOUSE_DATABASE
                         ClickHouse database name.
-  --max-workers MAX_WORKERS
-                        Number of worker threads (default: 4).
+  --chunk-size CHUNK_SIZE
+                        Chunk size for INSERT operations.
+
 ```
 
 Example:
@@ -48,7 +49,7 @@ python3 ./main.py --sqlite ~/Downloads/home-assistant_v2.db \
     --clickhouse-host duet-ubuntu \
     --clickhouse-user duyet \
     --clickhouse-password 123 \
-    --clickhouse-database home-assistant
+    --clickhouse-database home_assistant
 
 2024-07-25 15:04:42,056 - INFO - Connected to SQLite database: /Users/duet/Downloads/home-assistant_v2.db
 2024-07-25 15:04:42,059 - INFO - Connected to ClickHouse at duet-ubuntu:9000

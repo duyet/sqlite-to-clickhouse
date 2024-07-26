@@ -3,20 +3,21 @@ import logging
 import argparse
 from clickhouse_driver import Client
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ClickHouse settings
-clickhouse_settings = {
+CLICKHOUSE_SETTINGS = {
     "input_format_null_as_default": True,
     "max_insert_block_size": 1000000,
     "max_threads": 8,
 }
 
-def parse_datetime(value):
+def parse_datetime(value: str) -> Optional[datetime]:
     """Parse a string to a datetime object, handling fractional seconds."""
-    if value is None or not value.strip():
+    if not value or not value.strip():
         return None
     value = value.split(".")[0]  # Remove fractional seconds
     try:
@@ -25,9 +26,9 @@ def parse_datetime(value):
         logging.warning(f"Failed to parse DateTime: {value}")
         return None
 
-def parse_date(value):
+def parse_date(value: str) -> Optional[datetime.date]:
     """Parse a string to a date object."""
-    if value is None or not value.strip():
+    if not value or not value.strip():
         return None
     try:
         return datetime.strptime(value.strip(), "%Y-%m-%d").date()
@@ -35,7 +36,7 @@ def parse_date(value):
         logging.warning(f"Failed to parse Date: {value}")
         return None
 
-def infer_clickhouse_type(value):
+def infer_clickhouse_type(value: Any) -> str:
     """Infer the ClickHouse type based on the value."""
     if isinstance(value, bool):
         return "Boolean"
@@ -52,15 +53,13 @@ def infer_clickhouse_type(value):
         return "String"
     return "String"  # Default to String for unknown types
 
-def create_clickhouse_table(clickhouse_client, table_name, clickhouse_columns, primary_key, clickhouse_database):
+def create_clickhouse_table(clickhouse_client: Client, table_name: str, clickhouse_columns: List[str], primary_key: str, clickhouse_database: str) -> None:
     """Create a ClickHouse table based on the provided schema."""
     try:
-        # Check if the table already exists
         clickhouse_client.execute(f"DESCRIBE TABLE {clickhouse_database}.{table_name}")
         logging.info("Table %s already exists in ClickHouse.", table_name)
-        return  # Exit if the table already exists
-    except Exception as e:
-        # If the table does not exist, we will create it
+        return
+    except Exception:
         logging.info("Table %s does not exist. Creating a new table.", table_name)
 
     engine = "ReplacingMergeTree"
@@ -73,42 +72,50 @@ def create_clickhouse_table(clickhouse_client, table_name, clickhouse_columns, p
     logging.debug(f"Creating table: {create_table_query}")
     clickhouse_client.execute(create_table_query)
 
-def print_clickhouse_schema(clickhouse_client, table_name, clickhouse_database):
+def print_clickhouse_schema(clickhouse_client: Client, table_name: str, clickhouse_database: str) -> None:
     """Print the schema of the specified ClickHouse table."""
     schema_query = f"DESCRIBE TABLE {clickhouse_database}.{table_name}"
     schema = clickhouse_client.execute(schema_query)
     logging.info("ClickHouse schema %s: %s", table_name, ", ".join([f"{col[0]} -> {col[1]}" for col in schema]))
 
-def fetch_and_prepare_rows(sqlite_cursor, clickhouse_column_names, column_types):
-    """Fetch rows from SQLite and prepare them for insertion into ClickHouse."""
-    rows = sqlite_cursor.fetchall()
-    prepared_rows = []
-    for row in rows:
-        prepared_row = []
-        for name, value in zip(clickhouse_column_names, row):
-            expected_type = column_types[name]
-            if expected_type == "Int64":
-                prepared_row.append(int(value or 0))
-            elif expected_type == "UInt32":
-                prepared_row.append(int(value or 0) & 0xFFFFFFFF)  # Ensure it's within UInt32 range
-            elif expected_type == "UInt64":
-                prepared_row.append(int(value or 0) & 0xFFFFFFFFFFFFFFFF)  # Ensure it's within UInt64 range
-            elif expected_type == "Float64":
-                prepared_row.append(float(value or 0))
-            elif expected_type == "String":
-                prepared_row.append(str(value))
-            elif expected_type == "DateTime":
-                prepared_row.append(parse_datetime(value))
-            elif expected_type == "Date":
-                prepared_row.append(parse_date(value))
-            elif expected_type == "Boolean":
-                prepared_row.append(bool(value))
-            else:
-                prepared_row.append(value)  # Default case
-        prepared_rows.append(prepared_row)
-    return prepared_rows
+def prepare_row(row: tuple, clickhouse_column_names: List[str], column_types: Dict[str, str]) -> List[Any]:
+    """Prepare a single row for insertion into ClickHouse."""
+    prepared_row = []
+    for name, value in zip(clickhouse_column_names, row):
+        expected_type = column_types[name]
+        if expected_type == "Int64":
+            prepared_row.append(int(value or 0))
+        elif expected_type == "UInt32":
+            prepared_row.append(int(value or 0) & 0xFFFFFFFF)  # Ensure it's within UInt32 range
+        elif expected_type == "UInt64":
+            prepared_row.append(int(value or 0) & 0xFFFFFFFFFFFFFFFF)  # Ensure it's within UInt64 range
+        elif expected_type == "Float64":
+            prepared_row.append(float(value or 0))
+        elif expected_type == "String":
+            prepared_row.append(str(value))
+        elif expected_type == "DateTime":
+            prepared_row.append(parse_datetime(value))
+        elif expected_type == "Date":
+            prepared_row.append(parse_date(value))
+        elif expected_type == "Boolean":
+            prepared_row.append(bool(value))
+        else:
+            prepared_row.append(value)  # Default case
+    return prepared_row
 
-def infer_column_types(sqlite_cursor, table_name):
+def fetch_and_prepare_rows(sqlite_cursor: sqlite3.Cursor, clickhouse_column_names: List[str], column_types: Dict[str, str], chunk_size: int) -> List[List[Any]]:
+    """Fetch rows from SQLite and prepare them for insertion into ClickHouse."""
+    prepared_rows = []
+    while True:
+        rows = sqlite_cursor.fetchmany(chunk_size)
+        if not rows:
+            break
+        for row in rows:
+            prepared_rows.append(prepare_row(row, clickhouse_column_names, column_types))
+        yield prepared_rows
+        prepared_rows = []
+
+def infer_column_types(sqlite_cursor: sqlite3.Cursor, table_name: str) -> Dict[str, str]:
     """Infer column types from the SQLite table schema."""
     sqlite_cursor.execute(f"PRAGMA table_info({table_name})")
     columns = sqlite_cursor.fetchall()
@@ -128,63 +135,51 @@ def infer_column_types(sqlite_cursor, table_name):
         column_types[name] = ch_type
     return column_types
 
-def sqlite_to_clickhouse(sqlite_db_path, clickhouse_host, clickhouse_port, clickhouse_user, clickhouse_password, clickhouse_database):
+def sqlite_to_clickhouse(sqlite_db_path: str, clickhouse_host: str, clickhouse_port: int, clickhouse_user: str, clickhouse_password: str, clickhouse_database: str, chunk_size: int) -> None:
     """Transfer data from SQLite to ClickHouse."""
-    # Connect to SQLite database
-    sqlite_conn = sqlite3.connect(sqlite_db_path)
-    logging.info("Connected to SQLite database: %s", sqlite_db_path)
-    sqlite_cursor = sqlite_conn.cursor()
+    with sqlite3.connect(sqlite_db_path) as sqlite_conn:
+        logging.info("Connected to SQLite database: %s", sqlite_db_path)
+        sqlite_cursor = sqlite_conn.cursor()
 
-    # Get list of tables
-    sqlite_cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = sqlite_cursor.fetchall()
+        sqlite_cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = sqlite_cursor.fetchall()
 
-    # Connect to ClickHouse
-    clickhouse_client = Client(
-        host=clickhouse_host,
-        port=clickhouse_port,
-        user=clickhouse_user,
-        password=clickhouse_password,
-        database=clickhouse_database,
-        settings=clickhouse_settings,
-    )
-    logging.info("Connected to ClickHouse at %s:%s", clickhouse_host, clickhouse_port)
-
-    for table in tables:
-        table_name = table[0]
-        logging.info("Processing table: %s", table_name)
-
-        # Infer column types from SQLite
-        column_types = infer_column_types(sqlite_cursor, table_name)
-
-        # Create ClickHouse table schema
-        clickhouse_columns = [f"{name} {ch_type}" for name, ch_type in column_types.items()]
-
-        # Create the ClickHouse table
-        create_clickhouse_table(clickhouse_client, table_name, clickhouse_columns, None, clickhouse_database)
-
-        # Print the schema of the created table
-        print_clickhouse_schema(clickhouse_client, table_name, clickhouse_database)
-
-        # Fetch and prepare rows for insertion
-        sqlite_cursor.execute(f"SELECT * FROM {table_name}")
-        prepared_rows = fetch_and_prepare_rows(sqlite_cursor, clickhouse_column_names=list(column_types.keys()), column_types=column_types)
-
-        # Insert into ClickHouse
-        clickhouse_client.execute(
-            f"INSERT INTO {table_name} ({', '.join(column_types.keys())}) VALUES",
-            prepared_rows,
+        clickhouse_client = Client(
+            host=clickhouse_host,
+            port=clickhouse_port,
+            user=clickhouse_user,
+            password=clickhouse_password,
+            database=clickhouse_database,
+            settings=CLICKHOUSE_SETTINGS,
         )
-        logging.info("Inserted %d rows into %s", len(prepared_rows), table_name)
+        logging.info("Connected to ClickHouse at %s:%s", clickhouse_host, clickhouse_port)
 
-        # Optimize the table after insertion
-        clickhouse_client.execute(f"OPTIMIZE TABLE {clickhouse_database}.{table_name}")
-        logging.info("Optimized table %s in ClickHouse.", table_name)
+        for table in tables:
+            table_name = table[0]
+            logging.info("Processing table: %s", table_name)
 
-    # Close connections
-    sqlite_conn.close()
-    clickhouse_client.disconnect()
-    logging.info("Conversion completed successfully!")
+            column_types = infer_column_types(sqlite_cursor, table_name)
+            clickhouse_columns = [f"{name} {ch_type}" for name, ch_type in column_types.items()]
+
+            create_clickhouse_table(clickhouse_client, table_name, clickhouse_columns, None, clickhouse_database)
+            print_clickhouse_schema(clickhouse_client, table_name, clickhouse_database)
+
+            sqlite_cursor.execute(f"SELECT * FROM {table_name}")
+            column_names = list(column_types.keys())
+            insert_query = f"INSERT INTO {clickhouse_database}.{table_name} ({', '.join(column_names)}) VALUES"
+
+            total_rows = 0
+            for prepared_rows in fetch_and_prepare_rows(sqlite_cursor, column_names, column_types, chunk_size):
+                clickhouse_client.execute(insert_query, prepared_rows)
+                total_rows += len(prepared_rows)
+                logging.info("Inserted %d rows into %s", len(prepared_rows), table_name)
+
+            logging.info("Total %d rows inserted into %s", total_rows, table_name)
+            clickhouse_client.execute(f"OPTIMIZE TABLE {clickhouse_database}.{table_name}")
+            logging.info("Optimized table %s in ClickHouse.", table_name)
+
+        clickhouse_client.disconnect()
+        logging.info("Conversion completed successfully!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Transfer data from SQLite to ClickHouse.")
@@ -194,8 +189,9 @@ if __name__ == "__main__":
     parser.add_argument("--clickhouse-user", required=True, help="ClickHouse user.")
     parser.add_argument("--clickhouse-password", required=True, help="ClickHouse password.")
     parser.add_argument("--clickhouse-database", required=True, help="ClickHouse database name.")
+    parser.add_argument("--chunk-size", type=int, default=10000, help="Chunk size for INSERT operations.")
 
-    args = parser.parse_args()  # Parse the arguments
+    args = parser.parse_args()
 
     sqlite_to_clickhouse(
         sqlite_db_path=args.sqlite,
@@ -204,4 +200,5 @@ if __name__ == "__main__":
         clickhouse_user=args.clickhouse_user,
         clickhouse_password=args.clickhouse_password,
         clickhouse_database=args.clickhouse_database,
+        chunk_size=args.chunk_size,
     )
